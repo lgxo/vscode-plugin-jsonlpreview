@@ -1,0 +1,13 @@
+.gitignore
+.git/**
+.github/**
+.vscode/**
+.vscode-test/**
+demo.jsonl
+node_modules/**
+media/preview-*.svg
+src/**
+**/*.ts
+**/*.map
+package-lock.json
+tsconfig.json

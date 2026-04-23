@@ -1,0 +1,3 @@
+ {"name":"alice","age":18,"address":{"city":"shanghai"}}
+ {"name":"bob","tags":["dev","jsonl"],"active":true}
+ {"bad":}

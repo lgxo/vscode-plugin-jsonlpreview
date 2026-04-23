@@ -1,0 +1,73 @@
+{
+  "name": "jsonl-line-preview",
+  "displayName": "JSONL Line Preview",
+  "description": "Preview the current JSONL line as a collapsible JSON tree.",
+  "version": "0.1.0",
+  "publisher": "lgxo",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:lgxo/vscode-plugin-jsonlpreview.git"
+  },
+  "homepage": "https://github.com/lgxo/vscode-plugin-jsonlpreview#readme",
+  "bugs": {
+    "url": "https://github.com/lgxo/vscode-plugin-jsonlpreview/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "jsonl",
+    "json",
+    "preview",
+    "viewer",
+    "vscode"
+  ],
+  "activationEvents": [
+    "onCommand:jsonlLinePreview.previewCurrentLine"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "jsonlLinePreview.previewCurrentLine",
+        "title": "JSONL: Preview Current Line",
+        "icon": {
+          "light": "media/jsonl_icon_black&white.svg",
+          "dark": "media/jsonl_icon.svg"
+        }
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "jsonlLinePreview.previewCurrentLine",
+          "when": "editorTextFocus && resourceExtname == .jsonl",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "jsonlLinePreview.previewCurrentLine",
+          "when": "editorTextFocus && resourceExtname == .jsonl",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.5.4"
+  }
+}
