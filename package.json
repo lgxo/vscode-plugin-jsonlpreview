@@ -4,7 +4,7 @@
   "description": "Preview the current JSONL line as a collapsible JSON tree.",
   "version": "0.1.0",
   "publisher": "lgxo",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git@github.com:lgxo/vscode-plugin-jsonlpreview.git"
