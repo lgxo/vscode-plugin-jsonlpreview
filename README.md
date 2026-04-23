@@ -14,7 +14,7 @@ Preview the current line in a `.jsonl` file as a collapsible JSON tree.
 
 ### Option 1: install a packaged VSIX
 
-1. Download the `.vsix` file from this repository's release assets.
+1. Download the `.vsix` file from `release-assets/jsonl-line-preview-0.1.0.vsix` in this repository.
 2. In VS Code, run **Extensions: Install from VSIX...**
 3. Select the downloaded file.
 
