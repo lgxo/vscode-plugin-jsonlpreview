@@ -18,6 +18,8 @@ Preview the current line in a `.jsonl` file as a collapsible JSON tree.
 2. In VS Code, run **Extensions: Install from VSIX...**
 3. Select the downloaded file.
 
+Release copy for GitHub Releases is available in `release-assets/RELEASE_NOTES_v0.1.0.md`.
+
 ### Option 2: build the VSIX yourself
 
 ```bash
