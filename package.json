@@ -1,8 +1,8 @@
 {
   "name": "jsonl-line-preview",
   "displayName": "JSONL Line Preview",
-  "description": "Preview the current JSONL line as a collapsible JSON tree.",
-  "version": "0.1.0",
+  "description": "Preview JSONL records as formatted JSON with quick line navigation.",
+  "version": "0.2.0",
   "publisher": "lgxo",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,9 @@
     "vscode"
   ],
   "activationEvents": [
-    "onCommand:jsonlLinePreview.previewCurrentLine"
+    "onCommand:jsonlLinePreview.previewCurrentLine",
+    "onCommand:jsonlLinePreview.previewFileFromStart",
+    "onCommand:jsonlLinePreview.previewFileFromLineNumber"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -35,6 +37,22 @@
       {
         "command": "jsonlLinePreview.previewCurrentLine",
         "title": "JSONL: Preview Current Line",
+        "icon": {
+          "light": "media/jsonl_icon_black&white.svg",
+          "dark": "media/jsonl_icon.svg"
+        }
+      },
+      {
+        "command": "jsonlLinePreview.previewFileFromStart",
+        "title": "JSONL: Preview File From Line 1",
+        "icon": {
+          "light": "media/jsonl_icon_black&white.svg",
+          "dark": "media/jsonl_icon.svg"
+        }
+      },
+      {
+        "command": "jsonlLinePreview.previewFileFromLineNumber",
+        "title": "JSONL: Preview File From Line N",
         "icon": {
           "light": "media/jsonl_icon_black&white.svg",
           "dark": "media/jsonl_icon.svg"
@@ -54,6 +72,18 @@
           "command": "jsonlLinePreview.previewCurrentLine",
           "when": "editorTextFocus && resourceExtname == .jsonl",
           "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "jsonlLinePreview.previewFileFromStart",
+          "when": "resourceExtname == .jsonl",
+          "group": "navigation"
+        },
+        {
+          "command": "jsonlLinePreview.previewFileFromLineNumber",
+          "when": "resourceExtname == .jsonl",
+          "group": "navigation@1"
         }
       ]
     }

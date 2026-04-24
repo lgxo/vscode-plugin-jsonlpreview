@@ -1,23 +1,21 @@
+import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import * as vscode from "vscode";
 
-const COLLAPSED_PATHS_KEY = "jsonlLinePreview.collapsedPaths";
 const PREVIEW_PANEL_ID = "jsonlLinePreview.panel";
 const PREVIEW_PANEL_TITLE = "JSONL Line Preview";
 
-let collapsedPaths = new Set<string>();
 let lastJsonlSource: PreviewSource | undefined;
 let previewPanelCount = 0;
 
 export function activate(context: vscode.ExtensionContext): void {
-  collapsedPaths = new Set(context.workspaceState.get<string[]>(COLLAPSED_PATHS_KEY, []));
-
-  const disposable = vscode.commands.registerCommand(
+  const previewCurrentLineCommand = vscode.commands.registerCommand(
     "jsonlLinePreview.previewCurrentLine",
-    () => {
+    async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
-        void vscode.window.showErrorMessage("Open a JSONL file to preview a line.");
+        void vscode.window.showErrorMessage("Open a JSONL file to preview the current line.");
         return;
       }
 
@@ -27,8 +25,47 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       rememberJsonlSource(editor);
-      const preview = buildPreviewDataFromEditor(editor);
-      const panel = createPreviewPanel(context, preview);
+      const panel = createPreviewPanel(context, {
+        documentUri: editor.document.uri,
+        lineNumber: editor.selection.active.line
+      });
+      panel.reveal(vscode.ViewColumn.Beside);
+    }
+  );
+
+  const previewFileFromStartCommand = vscode.commands.registerCommand(
+    "jsonlLinePreview.previewFileFromStart",
+    async (resource?: vscode.Uri) => {
+      const targetUri = getTargetJsonlUri(resource);
+      if (!targetUri) {
+        return;
+      }
+
+      const panel = createPreviewPanel(context, {
+        documentUri: targetUri,
+        lineNumber: 0
+      });
+      panel.reveal(vscode.ViewColumn.Beside);
+    }
+  );
+
+  const previewFileFromLineNumberCommand = vscode.commands.registerCommand(
+    "jsonlLinePreview.previewFileFromLineNumber",
+    async (resource?: vscode.Uri) => {
+      const targetUri = getTargetJsonlUri(resource);
+      if (!targetUri) {
+        return;
+      }
+
+      const requestedLineNumber = await promptForLineNumber();
+      if (requestedLineNumber === undefined) {
+        return;
+      }
+
+      const panel = createPreviewPanel(context, {
+        documentUri: targetUri,
+        lineNumber: requestedLineNumber - 1
+      });
       panel.reveal(vscode.ViewColumn.Beside);
     }
   );
@@ -45,25 +82,82 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  context.subscriptions.push(disposable, activeEditorListener, selectionListener);
+  context.subscriptions.push(
+    previewCurrentLineCommand,
+    previewFileFromStartCommand,
+    previewFileFromLineNumberCommand,
+    activeEditorListener,
+    selectionListener
+  );
 }
 
 export function deactivate(): void {
-  collapsedPaths.clear();
   lastJsonlSource = undefined;
   previewPanelCount = 0;
 }
 
 function isJsonlDocument(document: vscode.TextDocument): boolean {
-  return document.fileName.toLowerCase().endsWith(".jsonl");
+  return isJsonlUri(document.uri);
+}
+
+function isJsonlUri(uri: vscode.Uri): boolean {
+  const target = (uri.fsPath || uri.path).toLowerCase();
+  return target.endsWith(".jsonl");
+}
+
+function getTargetJsonlUri(resource?: vscode.Uri): vscode.Uri | undefined {
+  const targetUri = resource ?? vscode.window.activeTextEditor?.document.uri;
+  if (!targetUri) {
+    void vscode.window.showErrorMessage("Select or open a .jsonl file before starting preview.");
+    return undefined;
+  }
+
+  if (!isJsonlUri(targetUri)) {
+    void vscode.window.showErrorMessage("The selected file must be a .jsonl document.");
+    return undefined;
+  }
+
+  return targetUri;
+}
+
+async function promptForLineNumber(): Promise<number | undefined> {
+  const value = await vscode.window.showInputBox({
+    title: "JSONL Preview Start Line",
+    prompt: "Enter the line number to preview first.",
+    placeHolder: "1",
+    validateInput: (input) => {
+      const trimmed = input.trim();
+      if (!trimmed) {
+        return "Line number is required.";
+      }
+
+      if (!/^\d+$/.test(trimmed)) {
+        return "Enter a positive integer.";
+      }
+
+      const lineNumber = Number(trimmed);
+      if (!Number.isSafeInteger(lineNumber) || lineNumber < 1) {
+        return "Enter a line number greater than 0.";
+      }
+
+      return undefined;
+    }
+  });
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return Number(value.trim());
 }
 
 function createPreviewPanel(
   context: vscode.ExtensionContext,
-  preview: PreviewData
+  initialSource: PreviewSource
 ): vscode.WebviewPanel {
   previewPanelCount += 1;
   const panelIndex = previewPanelCount;
+  const state: PreviewSource = { ...initialSource };
 
   const panel = vscode.window.createWebviewPanel(
     PREVIEW_PANEL_ID,
@@ -76,39 +170,88 @@ function createPreviewPanel(
     }
   );
 
-  updatePanelContent(panel, panelIndex, preview);
+  void renderPanel(panel, panelIndex, state);
 
   panel.webview.onDidReceiveMessage(async (message: PreviewMessage) => {
-    if (message.type === "useCurrentLine") {
-      const previewFromSource = await buildPreviewDataFromRememberedSource();
-      if (!previewFromSource) {
-        void vscode.window.showErrorMessage("Select a line in a .jsonl file before updating the preview.");
+    switch (message.type) {
+      case "useCurrentLine": {
+        const previewFromSource = await buildPreviewSourceFromRememberedSource();
+        if (!previewFromSource) {
+          void vscode.window.showErrorMessage("Select a line in a .jsonl file before updating the preview.");
+          return;
+        }
+
+        state.documentUri = previewFromSource.documentUri;
+        state.lineNumber = previewFromSource.lineNumber;
+        await renderPanel(panel, panelIndex, state);
         return;
       }
 
-      updatePanelContent(panel, panelIndex, previewFromSource);
-      return;
-    }
+      case "goToFirstLine":
+        state.lineNumber = 0;
+        await renderPanel(panel, panelIndex, state);
+        return;
 
-    if (message.type !== "toggle" || typeof message.path !== "string") {
-      return;
-    }
+      case "previousLine":
+        state.lineNumber = Math.max(state.lineNumber - 1, 0);
+        await renderPanel(panel, panelIndex, state);
+        return;
 
-    if (message.collapsed) {
-      collapsedPaths.add(message.path);
-    } else {
-      collapsedPaths.delete(message.path);
-    }
+      case "nextLine": {
+        const didNavigate = await tryNavigateToLine(panel, panelIndex, state, state.lineNumber + 1);
+        if (!didNavigate) {
+          void vscode.window.showInformationMessage("Already at the last line of this JSONL file.");
+        }
+        return;
+      }
 
-    void context.workspaceState.update(COLLAPSED_PATHS_KEY, [...collapsedPaths]);
+      case "jumpToLine": {
+        const requestedLineNumber = Number(message.lineNumber);
+        if (!Number.isInteger(requestedLineNumber) || requestedLineNumber < 1) {
+          void vscode.window.showErrorMessage("Enter a valid line number greater than 0.");
+          return;
+        }
+
+        const didNavigate = await tryNavigateToLine(panel, panelIndex, state, requestedLineNumber - 1);
+        if (!didNavigate) {
+          void vscode.window.showErrorMessage(`Line ${requestedLineNumber} does not exist in this JSONL file.`);
+        }
+      }
+    }
   }, null, context.subscriptions);
 
   return panel;
 }
 
+async function renderPanel(
+  panel: vscode.WebviewPanel,
+  panelIndex: number,
+  source: PreviewSource
+): Promise<void> {
+  const result = await buildPreviewDataFromUri(source.documentUri, source.lineNumber);
+  source.lineNumber = result.lineNumber;
+  updatePanelContent(panel, panelIndex, result.preview);
+}
+
+async function tryNavigateToLine(
+  panel: vscode.WebviewPanel,
+  panelIndex: number,
+  source: PreviewSource,
+  targetLineNumber: number
+): Promise<boolean> {
+  const result = await buildPreviewDataFromUri(source.documentUri, targetLineNumber);
+  if (result.isOutOfRange) {
+    return false;
+  }
+
+  source.lineNumber = result.lineNumber;
+  updatePanelContent(panel, panelIndex, result.preview);
+  return true;
+}
+
 function updatePanelContent(panel: vscode.WebviewPanel, panelIndex: number, preview: PreviewData): void {
   panel.title = `${PREVIEW_PANEL_TITLE} ${panelIndex} (Line ${preview.lineNumber})`;
-  panel.webview.html = renderPreview(preview, [...collapsedPaths]);
+  panel.webview.html = renderPreview(preview);
 }
 
 function rememberJsonlSource(editor: vscode.TextEditor): void {
@@ -118,73 +261,147 @@ function rememberJsonlSource(editor: vscode.TextEditor): void {
   };
 }
 
-async function buildPreviewDataFromRememberedSource(): Promise<PreviewData | undefined> {
+async function buildPreviewSourceFromRememberedSource(): Promise<PreviewSource | undefined> {
   if (!lastJsonlSource) {
     return undefined;
   }
 
-  const openDocument = vscode.workspace.textDocuments.find(
-    (document) => document.uri.toString() === lastJsonlSource?.documentUri.toString()
-  );
-
-  const document = openDocument ?? await vscode.workspace.openTextDocument(lastJsonlSource.documentUri);
-  return buildPreviewDataFromDocument(document, lastJsonlSource.lineNumber);
+  return { ...lastJsonlSource };
 }
 
-function buildPreviewDataFromEditor(editor: vscode.TextEditor): PreviewData {
-  return buildPreviewDataFromDocument(editor.document, editor.selection.active.line);
-}
+async function buildPreviewDataFromUri(
+  documentUri: vscode.Uri,
+  lineNumber: number
+): Promise<PreviewBuildResult> {
+  const sourceFileName = path.basename(documentUri.fsPath || documentUri.path);
+  const normalizedLineNumber = Math.max(lineNumber, 0);
+  const lineResult = await readJsonlLine(documentUri, normalizedLineNumber);
 
-function buildPreviewDataFromDocument(document: vscode.TextDocument, lineNumber: number): PreviewData {
-  const safeLineNumber = Math.min(Math.max(lineNumber, 0), Math.max(document.lineCount - 1, 0));
-  const lineText = document.lineAt(safeLineNumber).text.trim();
-  const sourceFileName = path.basename(document.fileName);
-
-  if (!lineText) {
+  if (lineResult.type === "missing") {
     return {
-      lineNumber: safeLineNumber + 1,
-      sourceFileName,
-      mode: "info",
-      title: `Line ${safeLineNumber + 1} is empty`,
-      message: "Move the cursor to a JSONL line with content before opening a preview."
+      lineNumber: 0,
+      isOutOfRange: normalizedLineNumber > 0 || lineResult.lineCount > 0,
+      preview: {
+        lineNumber: 1,
+        sourceFileName,
+        mode: "info",
+        title: lineResult.lineCount === 0 ? "The file is empty" : `Line ${normalizedLineNumber + 1} is out of range`,
+        message: lineResult.lineCount === 0
+          ? "This JSONL file has no lines to preview yet."
+          : `This JSONL file currently has ${lineResult.lineCount} line(s).`
+      }
+    };
+  }
+
+  const rawLine = lineResult.text;
+  const trimmedLine = rawLine.trim();
+
+  if (!trimmedLine) {
+    return {
+      lineNumber: normalizedLineNumber,
+      isOutOfRange: false,
+      preview: {
+        lineNumber: normalizedLineNumber + 1,
+        sourceFileName,
+        mode: "info",
+        title: `Line ${normalizedLineNumber + 1} is empty`,
+        message: "Move to another line, or jump to a line that contains JSON data."
+      }
     };
   }
 
   try {
+    const parsedValue = JSON.parse(trimmedLine) as unknown;
     return {
-      lineNumber: safeLineNumber + 1,
-      sourceFileName,
-      mode: "preview",
-      value: JSON.parse(lineText) as unknown
+      lineNumber: normalizedLineNumber,
+      isOutOfRange: false,
+      preview: {
+        lineNumber: normalizedLineNumber + 1,
+        sourceFileName,
+        mode: "preview",
+        formattedJson: JSON.stringify(parsedValue, null, 2)
+      }
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown parse error";
     return {
-      lineNumber: safeLineNumber + 1,
-      sourceFileName,
-      mode: "error",
-      message: `Unable to parse JSON on line ${safeLineNumber + 1}: ${message}`,
-      sourceLine: lineText
+      lineNumber: normalizedLineNumber,
+      isOutOfRange: false,
+      preview: {
+        lineNumber: normalizedLineNumber + 1,
+        sourceFileName,
+        mode: "error",
+        message: `Unable to parse JSON on line ${normalizedLineNumber + 1}: ${message}`,
+        sourceLine: rawLine
+      }
     };
   }
 }
 
-function renderPreview(preview: PreviewData, rememberedCollapsedPaths: string[]): string {
-  if (preview.mode === "preview") {
-    return renderPreviewHtml(preview, rememberedCollapsedPaths);
+async function readJsonlLine(documentUri: vscode.Uri, lineNumber: number): Promise<LineReadResult> {
+  const openDocument = vscode.workspace.textDocuments.find(
+    (document) => document.uri.toString() === documentUri.toString()
+  );
+
+  if (openDocument) {
+    return readJsonlLineFromDocument(openDocument, lineNumber);
   }
 
-  if (preview.mode === "error") {
-    return renderErrorHtml(preview);
+  if (documentUri.scheme === "file") {
+    return readJsonlLineFromFile(documentUri.fsPath, lineNumber);
   }
 
-  return renderInfoHtml(preview);
+  const document = await vscode.workspace.openTextDocument(documentUri);
+  return readJsonlLineFromDocument(document, lineNumber);
 }
 
-function renderPreviewHtml(preview: PreviewDataPreview, rememberedCollapsedPaths: string[]): string {
-  const payload = serializeForScript(preview.value);
-  const collapsedPayload = serializeForScript(rememberedCollapsedPaths);
+function readJsonlLineFromDocument(document: vscode.TextDocument, lineNumber: number): LineReadResult {
+  if (document.lineCount === 0 || lineNumber >= document.lineCount) {
+    return {
+      type: "missing",
+      lineCount: document.lineCount
+    };
+  }
 
+  return {
+    type: "line",
+    text: document.lineAt(lineNumber).text
+  };
+}
+
+async function readJsonlLineFromFile(filePath: string, lineNumber: number): Promise<LineReadResult> {
+  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  const reader = readline.createInterface({
+    input: stream,
+    crlfDelay: Infinity
+  });
+
+  let currentLineNumber = 0;
+
+  try {
+    for await (const line of reader) {
+      if (currentLineNumber === lineNumber) {
+        return {
+          type: "line",
+          text: line
+        };
+      }
+
+      currentLineNumber += 1;
+    }
+
+    return {
+      type: "missing",
+      lineCount: currentLineNumber
+    };
+  } finally {
+    reader.close();
+    stream.destroy();
+  }
+}
+
+function renderPreview(preview: PreviewData): string {
+  const bodyHtml = renderPreviewBody(preview);
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -213,8 +430,16 @@ function renderPreviewHtml(preview: PreviewDataPreview, rememberedCollapsedPaths
         margin: 0;
         color: var(--vscode-descriptionForeground);
       }
-      .actions {
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
         margin-top: 12px;
+      }
+      .jump-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       .action-button {
         border: 1px solid var(--vscode-button-border, transparent);
@@ -227,59 +452,34 @@ function renderPreviewHtml(preview: PreviewDataPreview, rememberedCollapsedPaths
       .action-button:hover {
         background: var(--vscode-button-hoverBackground);
       }
-      .tree,
-      .tree ul {
-        list-style: none;
+      .jump-input {
+        width: 96px;
+        border: 1px solid var(--vscode-input-border, transparent);
+        background: var(--vscode-input-background);
+        color: var(--vscode-input-foreground);
+        border-radius: 4px;
+        padding: 6px 8px;
+      }
+      .content {
+        border-radius: 6px;
+        background: var(--vscode-textCodeBlock-background);
+        padding: 12px;
+      }
+      .content pre {
         margin: 0;
-        padding-left: 16px;
-      }
-      .tree {
-        padding-left: 0;
-      }
-      .node {
-        margin: 4px 0;
-      }
-      .node-row {
-        display: flex;
-        align-items: flex-start;
-        gap: 6px;
-        line-height: 1.5;
+        white-space: pre-wrap;
         word-break: break-word;
+        font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+        font-size: var(--vscode-editor-font-size);
+        line-height: 1.5;
       }
-      .toggle {
-        appearance: none;
-        border: none;
-        background: transparent;
-        color: var(--vscode-textLink-foreground);
-        cursor: pointer;
-        padding: 0;
-        width: 14px;
-        flex: 0 0 14px;
+      .error {
+        color: var(--vscode-errorForeground);
+        margin: 0 0 12px;
       }
-      .toggle-placeholder {
-        width: 14px;
-        flex: 0 0 14px;
-      }
-      .key {
-        color: var(--vscode-symbolIcon-propertyForeground, var(--vscode-editor-foreground));
-      }
-      .string {
-        color: var(--vscode-debugTokenExpression-string);
-      }
-      .number {
-        color: var(--vscode-debugTokenExpression-number);
-      }
-      .boolean {
-        color: var(--vscode-debugTokenExpression-boolean);
-      }
-      .null {
-        color: var(--vscode-disabledForeground);
-      }
-      .punctuation {
-        color: var(--vscode-editor-foreground);
-      }
-      .collapsed > ul {
-        display: none;
+      .info {
+        color: var(--vscode-descriptionForeground);
+        margin: 0;
       }
     </style>
   </head>
@@ -287,243 +487,62 @@ function renderPreviewHtml(preview: PreviewDataPreview, rememberedCollapsedPaths
     <div class="header">
       <h1>${escapeHtml(PREVIEW_PANEL_TITLE)}</h1>
       <p>${escapeHtml(preview.sourceFileName)} · line ${preview.lineNumber}</p>
-      <div class="actions">
+      <div class="controls">
+        <button class="action-button" type="button" id="go-to-first-line">Line 1</button>
+        <button class="action-button" type="button" id="previous-line">Previous</button>
+        <button class="action-button" type="button" id="next-line">Next</button>
         <button class="action-button" type="button" id="use-current-line">Use Current Line</button>
+        <div class="jump-group">
+          <input class="jump-input" type="number" id="jump-line-input" min="1" step="1" value="${preview.lineNumber}" />
+          <button class="action-button" type="button" id="jump-to-line">Jump</button>
+        </div>
       </div>
     </div>
-    <div id="tree-root"></div>
+    <div class="content">
+      ${bodyHtml}
+    </div>
     <script>
       const vscode = acquireVsCodeApi();
-      const data = ${payload};
-      const collapsedPaths = new Set(${collapsedPayload});
+      const jumpInput = document.getElementById("jump-line-input");
 
-      function escapeHtml(value) {
-        return String(value)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      }
-
-      function primitiveClass(value) {
-        if (value === null) {
-          return "null";
-        }
-        return typeof value;
-      }
-
-      function primitiveMarkup(value) {
-        if (typeof value === "string") {
-          return '<span class="string">"' + escapeHtml(value) + '"</span>';
-        }
-        if (value === null) {
-          return '<span class="null">null</span>';
-        }
-        return '<span class="' + primitiveClass(value) + '">' + escapeHtml(value) + '</span>';
-      }
-
-      function summary(value) {
-        if (Array.isArray(value)) {
-          return '[...] (' + value.length + ')';
-        }
-        return '{...} (' + Object.keys(value).length + ')';
-      }
-
-      function encodePathSegment(segment) {
-        return String(segment).replace(/~/g, "~0").replace(/\\//g, "~1");
-      }
-
-      function childPath(path, segment) {
-        return path + "/" + encodePathSegment(segment);
-      }
-
-      function createNode(label, value, path) {
-        const item = document.createElement("li");
-        item.className = "node";
-        item.dataset.path = path;
-
-        const row = document.createElement("div");
-        row.className = "node-row";
-
-        const isExpandable = value !== null && typeof value === "object";
-        if (isExpandable) {
-          const toggle = document.createElement("button");
-          toggle.className = "toggle";
-          toggle.type = "button";
-          const isCollapsed = collapsedPaths.has(path);
-          toggle.textContent = isCollapsed ? "▸" : "▾";
-          item.classList.toggle("collapsed", isCollapsed);
-          toggle.addEventListener("click", () => {
-            const collapsed = item.classList.toggle("collapsed");
-            toggle.textContent = collapsed ? "▸" : "▾";
-            if (collapsed) {
-              collapsedPaths.add(path);
-            } else {
-              collapsedPaths.delete(path);
-            }
-            vscode.postMessage({ type: "toggle", path, collapsed });
-          });
-          row.appendChild(toggle);
-        } else {
-          const spacer = document.createElement("span");
-          spacer.className = "toggle-placeholder";
-          row.appendChild(spacer);
-        }
-
-        const content = document.createElement("span");
-        if (label !== null) {
-          content.innerHTML =
-            '<span class="key">' + escapeHtml(label) + '</span><span class="punctuation">: </span>';
-        }
-
-        if (isExpandable) {
-          content.innerHTML += '<span class="punctuation">' + summary(value) + '</span>';
-        } else {
-          content.innerHTML += primitiveMarkup(value);
-        }
-        row.appendChild(content);
-        item.appendChild(row);
-
-        if (isExpandable) {
-          const list = document.createElement("ul");
-          const entries = Array.isArray(value)
-            ? value.map((entry, index) => [String(index), entry])
-            : Object.entries(value);
-
-          for (const [childLabel, childValue] of entries) {
-            list.appendChild(createNode(childLabel, childValue, childPath(path, childLabel)));
-          }
-
-          if (entries.length === 0) {
-            list.appendChild(createNode(null, Array.isArray(value) ? "[]" : "{}", childPath(path, "__empty")));
-          }
-
-          item.appendChild(list);
-        }
-
-        return item;
-      }
-
-      const root = document.createElement("ul");
-      root.className = "tree";
-      root.appendChild(createNode(null, data, ""));
-      document.getElementById("tree-root").appendChild(root);
+      document.getElementById("go-to-first-line").addEventListener("click", () => {
+        vscode.postMessage({ type: "goToFirstLine" });
+      });
+      document.getElementById("previous-line").addEventListener("click", () => {
+        vscode.postMessage({ type: "previousLine" });
+      });
+      document.getElementById("next-line").addEventListener("click", () => {
+        vscode.postMessage({ type: "nextLine" });
+      });
       document.getElementById("use-current-line").addEventListener("click", () => {
         vscode.postMessage({ type: "useCurrentLine" });
+      });
+
+      function submitJump() {
+        const lineNumber = Number(jumpInput.value);
+        vscode.postMessage({ type: "jumpToLine", lineNumber });
+      }
+
+      document.getElementById("jump-to-line").addEventListener("click", submitJump);
+      jumpInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          submitJump();
+        }
       });
     </script>
   </body>
 </html>`;
 }
 
-function renderErrorHtml(preview: PreviewDataError): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${escapeHtml(PREVIEW_PANEL_TITLE)}</title>
-    <style>
-      body {
-        font-family: var(--vscode-font-family);
-        color: var(--vscode-editor-foreground);
-        background: var(--vscode-editor-background);
-        padding: 16px;
-      }
-      .error {
-        color: var(--vscode-errorForeground);
-        margin-bottom: 12px;
-      }
-      .actions {
-        margin: 12px 0;
-      }
-      .action-button {
-        border: 1px solid var(--vscode-button-border, transparent);
-        background: var(--vscode-button-background);
-        color: var(--vscode-button-foreground);
-        border-radius: 4px;
-        padding: 6px 10px;
-        cursor: pointer;
-      }
-      .action-button:hover {
-        background: var(--vscode-button-hoverBackground);
-      }
-      pre {
-        white-space: pre-wrap;
-        word-break: break-word;
-        background: var(--vscode-textCodeBlock-background);
-        padding: 12px;
-        border-radius: 6px;
-      }
-    </style>
-  </head>
-  <body>
-    <h1>${escapeHtml(PREVIEW_PANEL_TITLE)}</h1>
-    <p>${escapeHtml(preview.sourceFileName)} · line ${preview.lineNumber}</p>
-    <div class="actions">
-      <button class="action-button" type="button" id="use-current-line">Use Current Line</button>
-    </div>
-    <p class="error">${escapeHtml(preview.message)}</p>
-    <pre>${escapeHtml(preview.sourceLine)}</pre>
-    <script>
-      const vscode = acquireVsCodeApi();
-      document.getElementById("use-current-line").addEventListener("click", () => {
-        vscode.postMessage({ type: "useCurrentLine" });
-      });
-    </script>
-  </body>
-</html>`;
-}
-
-function renderInfoHtml(preview: PreviewDataInfo): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${escapeHtml(PREVIEW_PANEL_TITLE)}</title>
-    <style>
-      body {
-        font-family: var(--vscode-font-family);
-        color: var(--vscode-editor-foreground);
-        background: var(--vscode-editor-background);
-        padding: 16px;
-      }
-      p {
-        color: var(--vscode-descriptionForeground);
-      }
-      .actions {
-        margin: 12px 0;
-      }
-      .action-button {
-        border: 1px solid var(--vscode-button-border, transparent);
-        background: var(--vscode-button-background);
-        color: var(--vscode-button-foreground);
-        border-radius: 4px;
-        padding: 6px 10px;
-        cursor: pointer;
-      }
-      .action-button:hover {
-        background: var(--vscode-button-hoverBackground);
-      }
-    </style>
-  </head>
-  <body>
-    <h1>${escapeHtml(preview.title)}</h1>
-    <p>${escapeHtml(preview.sourceFileName)} · line ${preview.lineNumber}</p>
-    <div class="actions">
-      <button class="action-button" type="button" id="use-current-line">Use Current Line</button>
-    </div>
-    <p>${escapeHtml(preview.message)}</p>
-    <script>
-      const vscode = acquireVsCodeApi();
-      document.getElementById("use-current-line").addEventListener("click", () => {
-        vscode.postMessage({ type: "useCurrentLine" });
-      });
-    </script>
-  </body>
-</html>`;
+function renderPreviewBody(preview: PreviewData): string {
+  switch (preview.mode) {
+    case "preview":
+      return `<pre>${escapeHtml(preview.formattedJson)}</pre>`;
+    case "error":
+      return `<p class="error">${escapeHtml(preview.message)}</p><pre>${escapeHtml(preview.sourceLine)}</pre>`;
+    case "info":
+      return `<p class="info">${escapeHtml(preview.title)}</p><p class="info">${escapeHtml(preview.message)}</p>`;
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -535,22 +554,15 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function serializeForScript(value: unknown): string {
-  return JSON.stringify(value)
-    .replace(/</g, "\\u003c")
-    .replace(/>/g, "\\u003e")
-    .replace(/&/g, "\\u0026")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
-}
-
-type PreviewMessage = {
-  type: "toggle";
-  path: string;
-  collapsed: boolean;
-} | {
-  type: "useCurrentLine";
-};
+type PreviewMessage =
+  | { type: "goToFirstLine" }
+  | { type: "previousLine" }
+  | { type: "nextLine" }
+  | { type: "useCurrentLine" }
+  | {
+    type: "jumpToLine";
+    lineNumber: number;
+  };
 
 type PreviewDataBase = {
   lineNumber: number;
@@ -559,7 +571,7 @@ type PreviewDataBase = {
 
 type PreviewDataPreview = PreviewDataBase & {
   mode: "preview";
-  value: unknown;
+  formattedJson: string;
 };
 
 type PreviewDataError = PreviewDataBase & {
@@ -580,3 +592,19 @@ type PreviewSource = {
   documentUri: vscode.Uri;
   lineNumber: number;
 };
+
+type PreviewBuildResult = {
+  lineNumber: number;
+  isOutOfRange: boolean;
+  preview: PreviewData;
+};
+
+type LineReadResult =
+  | {
+    type: "line";
+    text: string;
+  }
+  | {
+    type: "missing";
+    lineCount: number;
+  };
